@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
 
+    # Gemini "Nano Banana" AI photo edit (F7 stretch). Opt-in, consented,
+    # solo-photo-only. Free tier via Google AI Studio. Blank = feature disabled
+    # (the edit endpoint returns 503). This is the ONLY path where an image may
+    # leave the machine, and only for a photo of just the requesting user.
+    gemini_api_key: str | None = None
+    gemini_image_model: str = "gemini-2.5-flash-image"
+
     @property
     def onnx_provider_list(self) -> list[str]:
         return [p.strip() for p in self.onnx_providers.split(",") if p.strip()]

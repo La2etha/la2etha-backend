@@ -37,3 +37,25 @@ async def faces_to_remove(session: AsyncSession, photo_id: uuid.UUID) -> list[di
         if is_background and not is_claimed_member:
             remove.append(bbox)
     return remove
+
+
+async def is_solo_editable(
+    session: AsyncSession, photo_id: uuid.UUID, account_id: uuid.UUID
+) -> bool:
+    """True only if the photo is safe to send to the cloud editor (F7): it may
+    contain no one but the requesting user.
+
+    Every detected face must belong to the caller's claimed cluster; a photo with
+    another member, or any unclaimed face (a stranger, or someone unconfirmed), is
+    blocked so no one else's face ever leaves the machine. A person-less photo
+    (e.g. scenery) is allowed — there's nobody to protect.
+    """
+    rows = (
+        await session.execute(
+            select(FaceCluster.claimed_by_account_id)
+            .select_from(DetectedFace)
+            .outerjoin(FaceCluster, FaceCluster.id == DetectedFace.cluster_id)
+            .where(DetectedFace.photo_id == photo_id)
+        )
+    ).all()
+    return all(claimed_by == account_id for (claimed_by,) in rows)
