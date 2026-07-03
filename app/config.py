@@ -31,13 +31,36 @@ class Settings(BaseSettings):
     insightface_model: str = "buffalo_l"
     onnx_providers: str = "CUDAExecutionProvider,CPUExecutionProvider"
 
+    # --- Semantic search (F5, SigLIP-2) — optional; requires the `search` extra ---
+    # If transformers/torch aren't installed the app still runs; search indexing is
+    # skipped and the search endpoint returns 503 until the model is available.
+    search_model: str = "google/siglip2-base-patch16-224"
+
     # --- Matching ---
     # Cosine similarity floor for linking an enrollment centroid to a face cluster.
     enroll_match_threshold: float = 0.35
 
+    # --- Quality culling (F3) & background/proximity filtering (F4) ---
+    # These are calibration knobs: the "right" values depend on the camera mix at
+    # a given event, so they are env-tunable rather than hard-coded. All are used
+    # only to DEMOTE photos to the secondary gallery section — never to hide them.
+    # Variance-of-Laplacian below this = motion-blur / blank floor-or-pocket shot.
+    quality_blur_min: float = 55.0
+    # A face smaller than this fraction of the frame is an incidental bystander.
+    proximity_area_min: float = 0.012
+    # Face-crop sharpness (VoL) below this corroborates an out-of-focus background face.
+    proximity_sharpness_min: float = 30.0
+
     # --- Optional / later phases ---
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: str | None = None
+
+    # Cloudflare R2 (S3-compatible) — only used when STORAGE_BACKEND=r2.
+    # Free tier: 10 GB storage + no egress fees. All optional; blank = disabled.
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
 
     @property
     def onnx_provider_list(self) -> list[str]:

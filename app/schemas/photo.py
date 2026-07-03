@@ -27,3 +27,16 @@ class ProcessingStatus(BaseModel):
     processed: int | None = None
     total: int | None = None
     progress: float | None = None
+
+
+class GDriveIngestRequest(BaseModel):
+    # Short-lived OAuth access token from the client-side Google Picker
+    # (drive.readonly / drive.file scope). Provide a folder_id, explicit
+    # file_ids, or both. Drive file IDs are opaque strings, not UUIDs.
+    access_token: str
+    folder_id: str | None = None
+    file_ids: list[str] | None = None
+
+
+class GDriveIngestAccepted(BaseModel):
+    job_id: str

@@ -24,7 +24,7 @@ def setup_logging() -> None:
 setup_logging()
 
 app = FastAPI(
-    title="La2etha! API",
+    title="Lahza API",
     version="0.1.0",
     description="Personalized event photo galleries — pooled photos, private per-person galleries.",
 )

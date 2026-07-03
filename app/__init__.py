@@ -1,1 +1,1 @@
-"""La2etha! backend application package."""
+"""Lahza backend application package."""

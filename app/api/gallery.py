@@ -55,7 +55,13 @@ async def get_gallery(
         entries = entries[:limit]
 
     items = [
-        GalleryPhoto(photo_id=e.photo_id, origin=e.origin, confidence=e.confidence)
+        GalleryPhoto(
+            photo_id=e.photo_id,
+            origin=e.origin,
+            relevance=e.relevance,
+            demote_reason=e.demote_reason,
+            confidence=e.confidence,
+        )
         for e in entries
     ]
     return GalleryPage(items=items, next_cursor=next_cursor)

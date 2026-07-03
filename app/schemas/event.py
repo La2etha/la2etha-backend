@@ -40,3 +40,11 @@ class MemberRead(BaseModel):
     account_id: uuid.UUID
     role: str
     joined_at: datetime
+
+
+class DemotedItem(BaseModel):
+    """A gallery photo demoted to a member's secondary section (F3/F4, FR-014)."""
+
+    photo_id: uuid.UUID
+    account_id: uuid.UUID
+    demote_reason: str | None = None

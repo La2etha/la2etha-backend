@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api import auth_routes, enrollment, events, gallery, photos
+from app.api import auth_routes, enrollment, events, export, gallery, photos, search
 
 api_router = APIRouter()
 
@@ -11,3 +11,5 @@ api_router.include_router(events.router)
 api_router.include_router(photos.router)
 api_router.include_router(enrollment.router)
 api_router.include_router(gallery.router)
+api_router.include_router(search.router)
+api_router.include_router(export.router)

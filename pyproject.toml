@@ -1,7 +1,7 @@
 [project]
 name = "la2etha-backend"
 version = "0.1.0"
-description = "La2etha! backend — API + async CV workers for personalized event photo galleries"
+description = "Lahza backend — API + async CV workers for personalized event photo galleries"
 readme = "README.md"
 # 3.11 or 3.12 only: the CV stack (insightface, onnxruntime-gpu, dlib) has no
 # prebuilt wheels for 3.13 yet, forcing source builds that need a C/C++ toolchain.
@@ -47,11 +47,31 @@ dev = [
     "ruff>=0.5",
     "black>=24.4",
 ]
-# Eval-only baselines (Phase 5). dlib powers the Chinese Whispers clustering
-# comparison (T051); it needs CMake + a C++ toolchain, so it is intentionally
-# not a core dependency — install with `pip install -e .[eval]` when benchmarking.
+# Eval-only baselines (Phase 5). Chinese Whispers is implemented in numpy
+# (eval/metrics_clustering.py), so dlib is NOT required; this extra only adds
+# dlib's reference implementation. Needs CMake + a C++ toolchain.
 eval = [
     "dlib>=19.24",
+]
+# Semantic search (F5, SigLIP-2). Heavy + CUDA-specific, so opt-in. Install the
+# CUDA build of torch separately per pytorch.org, then `pip install -e .[search]`.
+# Without this the app runs with search disabled (the endpoint returns 503).
+search = [
+    "torch>=2.2",
+    "transformers>=4.45",
+    "sentencepiece>=0.2",
+]
+# Privacy-removal export (F6, LaMa local inpainting). Heavy + CUDA-specific like
+# search; opt-in. `pip install -e .[export]` (after a CUDA torch). Without it,
+# export still serves originals; a removal request returns 503.
+export = [
+    "torch>=2.2",
+    "simple-lama-inpainting>=0.1.2",
+]
+# Cloudflare R2 storage (STORAGE_BACKEND=r2). Free tier: 10 GB, no egress.
+# Google Drive ingestion needs NO extra — it uses stdlib HTTP.
+cloud = [
+    "boto3>=1.34",
 ]
 
 [build-system]

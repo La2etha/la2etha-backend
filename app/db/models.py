@@ -31,6 +31,8 @@ from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 from app.db.base import Base
 
 EMBED_DIM = 512
+# SigLIP-2-Base image/text embedding dimension (F5 semantic search).
+SEARCH_EMBED_DIM = 768
 
 
 # --------------------------------------------------------------------------- #
@@ -108,6 +110,12 @@ class Photo(Base):
     __tablename__ = "photo"
     __table_args__ = (
         Index("ix_photo_event_phash", "event_id", "phash"),
+        Index(
+            "ix_photo_search_embedding_hnsw",
+            "search_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"search_embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -126,6 +134,10 @@ class Photo(Base):
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     quality_verdict: Mapped[str] = mapped_column(String(16), default="ok")  # ok|culled
     cull_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # SigLIP-2 image embedding for natural-language search (F5); null until indexed.
+    search_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(SEARCH_EMBED_DIM), nullable=True
+    )
     processing_status: Mapped[str] = mapped_column(
         String(16), default="pending"
     )  # pending|processing|done|failed
@@ -238,6 +250,11 @@ class GalleryEntry(Base):
         ForeignKey("photo.id", ondelete="cascade"), index=True
     )
     origin: Mapped[str] = mapped_column(String(8), default="auto")  # auto|claim
+    # "main" = a confident, in-focus subject photo; "low" = demoted by quality
+    # culling (F3) or background/proximity filtering (F4). Demoted entries are
+    # still shown, in the gallery's secondary "probably not interested" section.
+    relevance: Mapped[str] = mapped_column(String(8), default="main")  # main|low
+    demote_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

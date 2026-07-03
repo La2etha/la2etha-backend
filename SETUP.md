@@ -1,4 +1,4 @@
-# La2etha! backend — local setup
+# Lahza backend — local setup
 
 Environment notes and the exact steps to run the backend locally. These capture a
 few gotchas discovered on the primary dev box (Windows) so they don't bite again.

@@ -4,15 +4,16 @@ import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.guard import require_event_host
 from app.auth.users import current_active_user
 from app.config import get_settings
 from app.db.base import get_async_session
-from app.db.models import Account, Event, Membership
+from app.db.models import Account, Event, GalleryEntry, Membership, Photo
 from app.schemas.event import (
+    DemotedItem,
     EventCreate,
     EventCreated,
     EventJoin,
@@ -139,6 +140,55 @@ async def update_settings(
     await session.commit()
     await session.refresh(event)
     return event
+
+
+@router.get("/{event_id}/demoted", response_model=list[DemotedItem])
+async def list_demoted(
+    event_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> list[DemotedItem]:
+    """Host: photos demoted to members' secondary sections + why (F3/F4, FR-014)."""
+    await require_event_host(session, user.id, event_id)
+    rows = await session.execute(
+        select(GalleryEntry.photo_id, GalleryEntry.account_id, GalleryEntry.demote_reason)
+        .where(GalleryEntry.event_id == event_id, GalleryEntry.relevance == "low")
+        .order_by(GalleryEntry.created_at)
+    )
+    return [
+        DemotedItem(photo_id=p, account_id=a, demote_reason=r) for p, a, r in rows.all()
+    ]
+
+
+@router.post("/{event_id}/demoted/{photo_id}/promote", status_code=status.HTTP_204_NO_CONTENT)
+async def promote_demoted(
+    event_id: uuid.UUID,
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Host promotes a demoted photo back to the main gallery for everyone in it.
+
+    Clears the photo's cull verdict too, so a later re-materialization does not
+    demote it again.
+    """
+    await require_event_host(session, user.id, event_id)
+    photo = await session.get(Photo, photo_id)
+    if photo is None or photo.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    photo.quality_verdict = "ok"
+    photo.cull_reason = None
+    await session.execute(
+        update(GalleryEntry)
+        .where(
+            GalleryEntry.event_id == event_id,
+            GalleryEntry.photo_id == photo_id,
+            GalleryEntry.relevance == "low",
+        )
+        .values(relevance="main", demote_reason=None)
+    )
+    await session.commit()
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)

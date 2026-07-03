@@ -14,14 +14,20 @@ from rq import get_current_job
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.cv.detect import detect_faces
 from app.cv.embed import normalized_embedding
 from app.cv.enroll import aggregate_enrollment
 from app.cv.image import load_image, rgb_to_bgr
+from app.cv.proximity import face_crop_sharpness, is_background_face
+from app.cv.quality import assess_photo_quality
+from app.cv.search_embed import embed_image, search_available
 from app.db.models import DetectedFace, FaceCluster, IdentityEnrollment, Photo
 from app.db.sync import SyncSessionLocal
-from app.services.gallery import materialize_gallery, rematerialize_event
+from app.services.gallery import materialize_gallery, rematerialize_event, reset_auto_match
 from app.storage.base import get_storage
+
+settings = get_settings()
 
 
 def _set_progress(processed: int, total: int) -> None:
@@ -41,6 +47,7 @@ def process_photos(event_id: str, photo_ids: list[str]) -> dict:
     storage = get_storage()
     total = len(photo_ids)
     faces_written = 0
+    index_search = search_available()  # checked once; SigLIP is optional (F5)
 
     with SyncSessionLocal() as session:
         for idx, pid in enumerate(photo_ids, start=1):
@@ -54,7 +61,17 @@ def process_photos(event_id: str, photo_ids: list[str]) -> dict:
                 data = storage.get(photo.storage_key)
                 rgb, w, h, oriented = load_image(data)
                 photo.width, photo.height, photo.orientation_applied = w, h, oriented
-                for det in detect_faces(rgb_to_bgr(rgb)):
+                bgr = rgb_to_bgr(rgb)
+
+                detections = detect_faces(bgr)
+                for det in detections:
+                    sharpness = face_crop_sharpness(bgr, det.bbox)
+                    background = is_background_face(
+                        det.face_area_ratio,
+                        sharpness,
+                        settings.proximity_area_min,
+                        settings.proximity_sharpness_min,
+                    )
                     session.add(
                         DetectedFace(
                             photo_id=photo.id,
@@ -62,10 +79,29 @@ def process_photos(event_id: str, photo_ids: list[str]) -> dict:
                             landmarks=det.landmarks,
                             det_score=det.det_score,
                             face_area_ratio=det.face_area_ratio,
+                            face_sharpness=sharpness,
+                            is_background=background,
                             embedding=normalized_embedding(det).tolist(),
                         )
                     )
                     faces_written += 1
+
+                # Quality culling (F3) — records a verdict; never removes the photo.
+                verdict = assess_photo_quality(
+                    bgr, [d.det_score for d in detections], settings.quality_blur_min
+                )
+                photo.quality_score = verdict.score
+                photo.quality_verdict = verdict.verdict
+                photo.cull_reason = verdict.reason
+
+                # Semantic-search index (F5) — best-effort: if SigLIP isn't
+                # installed, or fails, the photo just won't be searchable.
+                if index_search:
+                    try:
+                        photo.search_embedding = embed_image(rgb).tolist()
+                    except Exception:
+                        pass
+
                 photo.processing_status = "done"
             except Exception:
                 photo.processing_status = "failed"
@@ -161,6 +197,9 @@ def process_enrollment(account_id: str, event_id: str, sample_keys: list[str]) -
         enrollment.quality_ok = aggregate.quality_ok
         session.flush()
 
+        # Re-enrollment must fully REPLACE the prior identity match, not add to it.
+        reset_auto_match(session, account_uuid, event_uuid)
+
         new_entries = materialize_gallery(session, account_uuid, event_uuid)
         session.commit()
 
@@ -172,4 +211,78 @@ def process_enrollment(account_id: str, event_id: str, sample_keys: list[str]) -
         "quality_ok": aggregate.quality_ok,
         "sample_count": aggregate.sample_count,
         "gallery_entries": new_entries,
+    }
+
+
+def ingest_gdrive(
+    event_id: str,
+    contributor_id: str,
+    access_token: str,
+    file_ids: list[str] | None = None,
+    folder_id: str | None = None,
+) -> dict:
+    """Download images from Google Drive into the event pool, dedup by phash
+    (FR-006), store them, then enqueue the normal processing pipeline.
+
+    ponytail: the short-lived Drive token rides in the job args (Redis); fine for
+    the demo — a hardening pass would keep it out of the queue payload.
+    """
+    from app.cv.image import dhash
+    from app.storage.gdrive import download_file, list_folder_images
+    from app.workers import get_queue
+
+    event_uuid = uuid.UUID(event_id)
+    contributor_uuid = uuid.UUID(contributor_id)
+    storage = get_storage()
+
+    ids = list(file_ids or [])
+    if folder_id:
+        ids.extend(f.id for f in list_folder_images(folder_id, access_token))
+
+    new_photo_ids: list[uuid.UUID] = []
+    duplicates = 0
+    with SyncSessionLocal() as session:
+        for fid in ids:
+            try:
+                data = download_file(fid, access_token)
+            except Exception:
+                continue
+            if not data:
+                continue
+            phash = dhash(data)
+            clash = session.scalar(
+                select(Photo.id).where(Photo.event_id == event_uuid, Photo.phash == phash)
+            )
+            if clash is not None:
+                duplicates += 1
+                continue
+            photo = Photo(
+                event_id=event_uuid,
+                contributor_id=contributor_uuid,
+                storage_key="",
+                source="gdrive",
+                phash=phash,
+                processing_status="pending",
+            )
+            session.add(photo)
+            session.flush()
+            key = f"events/{event_uuid}/{photo.id}"
+            storage.put(key, data)
+            photo.storage_key = key
+            new_photo_ids.append(photo.id)
+        session.commit()
+
+    process_job_id = ""
+    if new_photo_ids:
+        job = get_queue().enqueue(
+            "app.workers.pipeline.process_photos",
+            str(event_uuid),
+            [str(pid) for pid in new_photo_ids],
+        )
+        process_job_id = job.id
+
+    return {
+        "ingested": len(new_photo_ids),
+        "duplicates": duplicates,
+        "process_job_id": process_job_id,
     }

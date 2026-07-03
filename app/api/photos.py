@@ -12,7 +12,13 @@ from app.auth.users import current_active_user
 from app.cv.image import dhash
 from app.db.base import get_async_session
 from app.db.models import Account, Membership, Photo
-from app.schemas.photo import PhotoRead, ProcessingStatus, UploadAccepted
+from app.schemas.photo import (
+    GDriveIngestAccepted,
+    GDriveIngestRequest,
+    PhotoRead,
+    ProcessingStatus,
+    UploadAccepted,
+)
 from app.storage.base import get_storage
 from app.workers import get_queue, job_status
 
@@ -104,6 +110,33 @@ async def upload_photos(
         accepted=len(photo_ids),
         duplicates=duplicates,
     )
+
+
+@router.post(
+    "/events/{event_id}/ingest/gdrive",
+    response_model=GDriveIngestAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_gdrive(
+    event_id: uuid.UUID,
+    payload: GDriveIngestRequest,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> GDriveIngestAccepted:
+    """Pull images from a Google Drive folder/files into the pool (background job)."""
+    await _require_membership(session, user.id, event_id)
+    if not payload.folder_id and not payload.file_ids:
+        raise HTTPException(status_code=422, detail="Provide a folder_id or file_ids")
+
+    job = get_queue().enqueue(
+        "app.workers.pipeline.ingest_gdrive",
+        str(event_id),
+        str(user.id),
+        payload.access_token,
+        payload.file_ids,
+        payload.folder_id,
+    )
+    return GDriveIngestAccepted(job_id=job.id)
 
 
 @router.get("/events/{event_id}/photos/processing", response_model=ProcessingStatus)

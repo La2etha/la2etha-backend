@@ -36,5 +36,27 @@ def get_storage() -> StorageAdapter:
         from app.storage.local_fs import LocalFilesystemStorage
 
         return LocalFilesystemStorage(settings.media_root)
-    # r2 / gdrive adapters arrive in Phase 8.
+    if backend == "r2":
+        from app.storage.r2 import R2Storage
+
+        missing = [
+            name
+            for name, val in {
+                "R2_ACCOUNT_ID": settings.r2_account_id,
+                "R2_ACCESS_KEY_ID": settings.r2_access_key_id,
+                "R2_SECRET_ACCESS_KEY": settings.r2_secret_access_key,
+                "R2_BUCKET": settings.r2_bucket,
+            }.items()
+            if not val
+        ]
+        if missing:
+            raise ValueError(f"STORAGE_BACKEND=r2 requires: {', '.join(missing)}")
+        return R2Storage(
+            settings.r2_account_id,
+            settings.r2_access_key_id,
+            settings.r2_secret_access_key,
+            settings.r2_bucket,
+        )
+    # Google Drive is an ingestion source (app/storage/gdrive.py), not a storage
+    # backend: Drive photos are downloaded, then stored via the backend above.
     raise ValueError(f"Unsupported STORAGE_BACKEND: {backend!r}")
