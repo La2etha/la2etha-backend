@@ -1,0 +1,114 @@
+"""Multi-angle enrollment (F2) and own-identity deletion (FR-022)."""
+
+import uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from rq.job import Job
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.users import current_active_user
+from app.db.base import get_async_session
+from app.db.models import Account, FaceCluster, GalleryEntry, IdentityEnrollment, Membership
+from app.schemas.enrollment import EnrollmentAccepted, EnrollmentStatus
+from app.storage.base import get_storage
+from app.workers import get_queue, get_redis
+
+router = APIRouter(tags=["enrollment"])
+
+MIN_SAMPLES = 3
+MAX_SAMPLES = 8
+
+
+async def _require_membership(
+    session: AsyncSession, account_id: uuid.UUID, event_id: uuid.UUID
+) -> None:
+    member = await session.scalar(
+        select(Membership.id).where(
+            Membership.event_id == event_id, Membership.account_id == account_id
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+
+@router.post(
+    "/events/{event_id}/enroll",
+    response_model=EnrollmentAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def enroll(
+    event_id: uuid.UUID,
+    files: list[UploadFile] = File(...),
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> EnrollmentAccepted:
+    """Upload 3–5 multi-angle photos → build an identity centroid in the worker."""
+    await _require_membership(session, user.id, event_id)
+    if not (MIN_SAMPLES <= len(files) <= MAX_SAMPLES):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Provide {MIN_SAMPLES}–{MAX_SAMPLES} enrollment photos",
+        )
+
+    storage = get_storage()
+    sample_keys: list[str] = []
+    for upload in files:
+        data = await upload.read()
+        if not data:
+            continue
+        key = f"enroll/{event_id}/{user.id}/{uuid.uuid4()}"
+        storage.put(key, data)
+        sample_keys.append(key)
+
+    if not sample_keys:
+        raise HTTPException(status_code=422, detail="No usable enrollment images")
+
+    job = get_queue().enqueue(
+        "app.workers.pipeline.process_enrollment",
+        str(user.id),
+        str(event_id),
+        sample_keys,
+    )
+    return EnrollmentAccepted(job_id=job.id, sample_count=len(sample_keys))
+
+
+@router.get("/events/{event_id}/enroll/status", response_model=EnrollmentStatus)
+async def enroll_status(
+    event_id: uuid.UUID,
+    job_id: str = Query(...),
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> EnrollmentStatus:
+    await _require_membership(session, user.id, event_id)
+    try:
+        job = Job.fetch(job_id, connection=get_redis())
+    except Exception:
+        return EnrollmentStatus(job_id=job_id, status="unknown")
+
+    result = job.result if job.is_finished else None
+    payload = {"job_id": job_id, "status": job.get_status(refresh=True)}
+    if isinstance(result, dict):
+        payload.update(
+            {k: result.get(k) for k in ("enrolled", "quality_ok", "sample_count", "gallery_entries", "reason")}
+        )
+    return EnrollmentStatus(**payload)
+
+
+@router.delete("/users/me/identity", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_own_identity(
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Remove the caller's enrollments + gallery entries and unlink any clusters
+    they claimed (FR-022)."""
+    await session.execute(
+        update(FaceCluster)
+        .where(FaceCluster.claimed_by_account_id == user.id)
+        .values(claimed_by_account_id=None)
+    )
+    await session.execute(delete(GalleryEntry).where(GalleryEntry.account_id == user.id))
+    await session.execute(
+        delete(IdentityEnrollment).where(IdentityEnrollment.account_id == user.id)
+    )
+    await session.commit()

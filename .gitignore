@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-test/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Env & secrets
+.env
+.env.local
+
+# Media / models
+media/
+*.onnx
+~/.insightface/
+
+# OS
+.DS_Store
+Thumbs.db
