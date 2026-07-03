@@ -11,10 +11,11 @@ from app.access.guard import require_event_host, require_photo_read
 from app.auth.users import current_active_user
 from app.cv.image import dhash
 from app.db.base import get_async_session
-from app.db.models import Account, Membership, Photo
+from app.db.models import Account, DetectedFace, FaceCluster, Membership, Photo
 from app.schemas.photo import (
     GDriveIngestAccepted,
     GDriveIngestRequest,
+    PhotoFace,
     PhotoRead,
     ProcessingStatus,
     UploadAccepted,
@@ -160,6 +161,39 @@ async def read_photo(
     photo = await require_photo_read(session, user.id, photo_id)
     data = get_storage().get(photo.storage_key)
     return Response(content=data, media_type=_content_type(data))
+
+
+@router.get("/photos/{photo_id}/faces", response_model=list[PhotoFace])
+async def read_photo_faces(
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> list[PhotoFace]:
+    """Detected-face boxes for a photo the caller may view, each flagged `is_me`
+    when its cluster is claimed by the caller — powers the trust overlay (FR-024)."""
+    photo = await require_photo_read(session, user.id, photo_id)
+    if not photo.width or not photo.height:
+        return []  # not yet processed → no boxes to normalize
+
+    rows = (
+        await session.execute(
+            select(DetectedFace.bbox, FaceCluster.claimed_by_account_id)
+            .outerjoin(FaceCluster, FaceCluster.id == DetectedFace.cluster_id)
+            .where(DetectedFace.photo_id == photo_id)
+        )
+    ).all()
+
+    w, h = float(photo.width), float(photo.height)
+    return [
+        PhotoFace(
+            x=bbox["x"] / w,
+            y=bbox["y"] / h,
+            w=bbox["w"] / w,
+            h=bbox["h"] / h,
+            is_me=claimed_by == user.id,
+        )
+        for bbox, claimed_by in rows
+    ]
 
 
 @router.get("/events/{event_id}/pool", response_model=list[PhotoRead])

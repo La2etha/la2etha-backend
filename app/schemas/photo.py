@@ -40,3 +40,13 @@ class GDriveIngestRequest(BaseModel):
 
 class GDriveIngestAccepted(BaseModel):
     job_id: str
+
+
+class PhotoFace(BaseModel):
+    # Bounding box normalized to 0..1 of the photo's width/height, so the client
+    # can scale it to whatever size the image is rendered at (FR-024).
+    x: float
+    y: float
+    w: float
+    h: float
+    is_me: bool  # this face's cluster is claimed by the requesting account
