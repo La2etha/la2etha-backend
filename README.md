@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.png" width="180" alt="Lahza logo" />
+<img src="assets/orange.png"  alt="Lahza logo" />
 
-# Lahza · لحظة — Backend
+# Lahza Backend
 
 **FastAPI service + async CV workers** for personalized event photo galleries.
 
