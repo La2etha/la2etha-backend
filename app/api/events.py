@@ -4,7 +4,7 @@ import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.guard import require_event_host
@@ -18,6 +18,7 @@ from app.schemas.event import (
     EventCreate,
     EventCreated,
     EventJoin,
+    EventListItem,
     EventRead,
     EventSettingsUpdate,
     MemberRead,
@@ -61,6 +62,42 @@ async def create_event(
 
     link = f"{_app_base_url()}/events/join?code={event.join_code}"
     return EventCreated(**EventRead.model_validate(event).model_dump(), join_link=link)
+
+
+@router.get("", response_model=list[EventListItem])
+async def list_events(
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> list[EventListItem]:
+    """Events the caller belongs to, newest first, with their role + light counts
+    for the home-screen ticket stubs."""
+    member_count = (
+        select(func.count(Membership.id))
+        .where(Membership.event_id == Event.id)
+        .correlate(Event)
+        .scalar_subquery()
+    )
+    photo_count = (
+        select(func.count(Photo.id))
+        .where(Photo.event_id == Event.id)
+        .correlate(Event)
+        .scalar_subquery()
+    )
+    rows = await session.execute(
+        select(Event, Membership.role, member_count, photo_count)
+        .join(Membership, Membership.event_id == Event.id)
+        .where(Membership.account_id == user.id)
+        .order_by(Event.created_at.desc())
+    )
+    return [
+        EventListItem(
+            **EventRead.model_validate(event).model_dump(),
+            role=role,
+            member_count=members,
+            photo_count=photos,
+        )
+        for event, role, members, photos in rows.all()
+    ]
 
 
 @router.post("/join", response_model=EventRead)

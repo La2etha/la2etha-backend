@@ -26,6 +26,14 @@ class EventCreated(EventRead):
     join_link: str
 
 
+class EventListItem(EventRead):
+    """An event as it appears in the caller's events list (home screen)."""
+
+    role: str
+    member_count: int
+    photo_count: int
+
+
 class EventJoin(BaseModel):
     join_code: str
 
