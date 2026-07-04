@@ -20,6 +20,7 @@ from app.cv.enroll import match_centroid_to_clusters
 from app.db.models import (
     DetectedFace,
     FaceCluster,
+    GalleryClaim,
     GalleryEntry,
     IdentityEnrollment,
     Photo,
@@ -134,10 +135,21 @@ def materialize_gallery(session: Session, account_id: uuid.UUID, event_id: uuid.
             )
         ).all()
     )
+    # Photos the caller manually rejected ("not me", FR-018) stay out — never
+    # resurrected by an auto match.
+    unclaimed = set(
+        session.scalars(
+            select(GalleryClaim.photo_id).where(
+                GalleryClaim.account_id == account_id,
+                GalleryClaim.state == "unclaimed",
+                GalleryClaim.photo_id.in_(list(per_photo.keys())),
+            )
+        ).all()
+    )
 
     created = 0
     for photo_id, agg in per_photo.items():
-        if photo_id in existing:
+        if photo_id in existing or photo_id in unclaimed:
             continue
         relevance, reason = _relevance(agg)
         session.add(

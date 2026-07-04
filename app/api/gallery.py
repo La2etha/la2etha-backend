@@ -2,13 +2,13 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.users import current_active_user
 from app.db.base import get_async_session
-from app.db.models import Account, GalleryEntry, Membership
+from app.db.models import Account, GalleryClaim, GalleryEntry, Membership, Photo
 from app.schemas.gallery import EmptyState, GalleryPage, GalleryPhoto
 
 router = APIRouter(tags=["gallery"])
@@ -65,6 +65,86 @@ async def get_gallery(
         for e in entries
     ]
     return GalleryPage(items=items, next_cursor=next_cursor)
+
+
+async def set_claim(
+    session: AsyncSession, account_id: uuid.UUID, photo: Photo, *, claimed: bool
+) -> None:
+    """Record a manual 'this is me' / 'not me' correction and sync the gallery
+    (FR-018). ``claimed`` produces a GalleryEntry(origin='claim') granting access;
+    unclaim removes the caller's entry (auto or claim) for the photo. The
+    GalleryClaim row is the durable record — a lasting 'unclaimed' tombstone keeps
+    auto re-materialization from resurrecting a photo the caller rejected."""
+    state = "claimed" if claimed else "unclaimed"
+    row = await session.scalar(
+        select(GalleryClaim).where(
+            GalleryClaim.account_id == account_id, GalleryClaim.photo_id == photo.id
+        )
+    )
+    if row is None:
+        session.add(GalleryClaim(account_id=account_id, photo_id=photo.id, state=state))
+    else:
+        row.state = state
+
+    if claimed:
+        exists = await session.scalar(
+            select(GalleryEntry.id).where(
+                GalleryEntry.account_id == account_id, GalleryEntry.photo_id == photo.id
+            )
+        )
+        if exists is None:
+            session.add(
+                GalleryEntry(
+                    account_id=account_id,
+                    event_id=photo.event_id,
+                    photo_id=photo.id,
+                    origin="claim",
+                    relevance="main",
+                )
+            )
+    else:
+        await session.execute(
+            delete(GalleryEntry).where(
+                GalleryEntry.account_id == account_id, GalleryEntry.photo_id == photo.id
+            )
+        )
+
+
+async def _member_photo(
+    session: AsyncSession, account_id: uuid.UUID, photo_id: uuid.UUID
+) -> Photo:
+    """Load a photo the caller may correct: it must exist and they must be a
+    member of its event. (Unlike a photo READ, claiming a MISSED photo is allowed
+    even when the caller isn't yet verified in it — that's the whole point.)"""
+    photo = await session.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    await _require_membership(session, account_id, photo.event_id)
+    return photo
+
+
+@router.post("/photos/{photo_id}/claim", status_code=status.HTTP_204_NO_CONTENT)
+async def claim_photo(
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Claim a photo as containing you (FR-018) — grants access + adds it to your gallery."""
+    photo = await _member_photo(session, user.id, photo_id)
+    await set_claim(session, user.id, photo, claimed=True)
+    await session.commit()
+
+
+@router.delete("/photos/{photo_id}/claim", status_code=status.HTTP_204_NO_CONTENT)
+async def unclaim_photo(
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Retract a photo from your gallery (FR-018) — removes it and revokes access."""
+    photo = await _member_photo(session, user.id, photo_id)
+    await set_claim(session, user.id, photo, claimed=False)
+    await session.commit()
 
 
 @router.get("/events/{event_id}/gallery/empty-state", response_model=EmptyState)

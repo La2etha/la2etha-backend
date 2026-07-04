@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     # --- Auth ---
     jwt_secret: str = "change-me-in-production"
     jwt_lifetime_seconds: int = 3600
+    # Brute-force guard on login: max attempts per client IP per window (Redis).
+    # 0 disables it (e.g. tests). Fail-open if Redis is down — availability over
+    # lockout; the Cloudflare Tunnel edge also rate-limits in production.
+    login_rate_limit: int = 10
+    login_rate_window_seconds: int = 60
+
+    # --- Uploads ---
+    # Per-file ceiling for uploaded photos (memory/DoS guard). 25 MB covers large
+    # phone shots and HEIC; oversize files are rejected 413.
+    max_upload_bytes: int = 25 * 1024 * 1024
 
     # --- CORS (comma-separated allowed origins for the web/mobile clients) ---
     cors_origins: str = "http://localhost:5173"
@@ -68,6 +78,10 @@ class Settings(BaseSettings):
     # leave the machine, and only for a photo of just the requesting user.
     gemini_api_key: str | None = None
     gemini_image_model: str = "gemini-2.5-flash-image"
+    # Solo-photo guard for AI edit (FR-017). Secure by default: only a photo of
+    # just the caller may be sent to the cloud editor. Set EDIT_SOLO_ONLY=false
+    # in a dev .env to relax it while trying the system out — never in a deploy.
+    edit_solo_only: bool = True
 
     @property
     def onnx_provider_list(self) -> list[str]:

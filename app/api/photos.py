@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.guard import require_event_host, require_photo_read
 from app.auth.users import current_active_user
+from app.config import get_settings
 from app.cv.image import dhash
 from app.db.base import get_async_session
 from app.db.models import Account, DetectedFace, FaceCluster, Membership, Photo
@@ -63,12 +64,29 @@ async def upload_photos(
     bytes, and enqueue background processing (202 — never blocks, SC-006)."""
     await _require_membership(session, user.id, event_id)
     storage = get_storage()
+    max_bytes = get_settings().max_upload_bytes
 
     photo_ids: list[uuid.UUID] = []
     duplicates = 0
     # Track phashes seen in this batch as well as those already in the event.
     for upload in files:
+        if upload.content_type and not upload.content_type.startswith("image/"):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Only image files can be uploaded.",
+            )
+        # Reject oversize before reading it fully into memory when the size is known.
+        if upload.size is not None and upload.size > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="A file exceeds the maximum upload size.",
+            )
         data = await upload.read()
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="A file exceeds the maximum upload size.",
+            )
         if not data:
             continue
         phash = dhash(data)

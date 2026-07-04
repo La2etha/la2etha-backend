@@ -8,7 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
+from app.auth.ratelimit import LOGIN_PATH_SUFFIX, register_attempt
 from app.config import get_settings
+from app.workers import get_redis
 
 settings = get_settings()
 
@@ -36,6 +38,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def login_rate_limit(request: Request, call_next):
+    """Throttle repeated login attempts per client IP (brute-force guard)."""
+    if request.method == "POST" and request.url.path.endswith(LOGIN_PATH_SUFFIX):
+        ip = request.client.host if request.client else "unknown"
+        allowed = register_attempt(
+            get_redis(),
+            ip,
+            limit=settings.login_rate_limit,
+            window=settings.login_rate_window_seconds,
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Too many login attempts. Please wait and try again."},
+            )
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)

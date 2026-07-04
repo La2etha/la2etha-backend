@@ -12,6 +12,7 @@ from app.auth.users import current_active_user
 from app.config import get_settings
 from app.db.base import get_async_session
 from app.db.models import Account, Event, GalleryEntry, Membership, Photo
+from app.storage.base import get_storage
 from app.schemas.event import (
     DemotedItem,
     EventCreate,
@@ -201,7 +202,15 @@ async def delete_event(
     event = await session.get(Event, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+    # Collect storage keys BEFORE the cascade removes the photo rows (FR-022).
+    keys = list(
+        await session.scalars(select(Photo.storage_key).where(Photo.event_id == event_id))
+    )
     # FK cascades delete photos, faces, clusters, galleries, memberships.
-    # ponytail: storage-byte deletion is wired in the retention sweep (T080).
     await session.delete(event)
     await session.commit()
+    # Then purge the bytes. Done after the DB commit so a storage hiccup leaves
+    # orphaned files (harmless, sweepable) rather than DB rows pointing at gone bytes.
+    storage = get_storage()
+    for key in keys:
+        storage.delete(key)

@@ -17,6 +17,7 @@ from app.auth.users import current_active_user
 from app.cv.edit_gemini import edit_image, gemini_available
 from app.cv.image import load_image
 from app.cv.removal import lama_available
+from app.config import get_settings
 from app.db.base import get_async_session
 from app.db.models import Account
 from app.services.export import faces_to_remove, is_solo_editable
@@ -95,7 +96,9 @@ async def edit_photo(
 
     photo = await require_photo_read(session, user.id, photo_id)
 
-    if not await is_solo_editable(session, photo_id, user.id):
+    if get_settings().edit_solo_only and not await is_solo_editable(
+        session, photo_id, user.id
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="AI editing is only allowed on a photo of just you (no other people).",
