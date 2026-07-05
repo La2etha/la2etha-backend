@@ -1,8 +1,9 @@
 """Photo pooling: upload, processing status, access-guarded read, host pool."""
 
+import hashlib
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,7 @@ from app.access.guard import is_event_host, require_event_host, require_photo_re
 from app.auth.users import current_active_user
 from app.config import get_settings
 from app.cv.image import dhash
+from app.cv.video import probe
 from app.db.base import get_async_session
 from app.db.models import Account, DetectedFace, Event, FaceCluster, Membership, Photo
 from app.services.curation import auto_pick_cover_photo_id
@@ -20,12 +22,15 @@ from app.schemas.photo import (
     PhotoFace,
     PhotoRead,
     ProcessingStatus,
+    RejectedUpload,
     UploadAccepted,
 )
 from app.storage.base import get_storage
 from app.workers import get_queue, job_status
 
 router = APIRouter(tags=["photos"])
+
+MAX_VIDEO_DURATION_S = 60.0
 
 
 def _content_type(data: bytes) -> str:
@@ -95,13 +100,14 @@ async def upload_photos(
 
     photo_ids: list[uuid.UUID] = []
     duplicates = 0
-    # Track phashes seen in this batch as well as those already in the event.
+    rejected: list[RejectedUpload] = []
+    # Track phashes/content_hashes seen in this batch as well as those already in the event.
     for upload in files:
-        if upload.content_type and not upload.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Only image files can be uploaded.",
-            )
+        content_type = upload.content_type or ""
+        is_video = content_type.startswith("video/")
+        if not is_video and not content_type.startswith("image/"):
+            rejected.append(RejectedUpload(filename=upload.filename, reason="unsupported_type"))
+            continue
         # Reject oversize before reading it fully into memory when the size is known.
         if upload.size is not None and upload.size > max_bytes:
             raise HTTPException(
@@ -116,22 +122,53 @@ async def upload_photos(
             )
         if not data:
             continue
-        phash = dhash(data)
-        clash = await session.scalar(
-            select(Photo.id).where(Photo.event_id == event_id, Photo.phash == phash)
-        )
-        if clash is not None:
-            duplicates += 1
-            continue
 
-        photo = Photo(
-            event_id=event_id,
-            contributor_id=user.id,
-            storage_key="",  # set below once we have the id
-            source="upload",
-            phash=phash,
-            processing_status="pending",
-        )
+        if is_video:
+            probed = probe(data)
+            if not probed.ok:
+                rejected.append(RejectedUpload(filename=upload.filename, reason="undecodable"))
+                continue
+            if (probed.duration_s or 0) > MAX_VIDEO_DURATION_S:
+                rejected.append(
+                    RejectedUpload(filename=upload.filename, reason="duration_exceeds_60s")
+                )
+                continue
+            content_hash = hashlib.sha256(data).hexdigest()
+            clash = await session.scalar(
+                select(Photo.id).where(
+                    Photo.event_id == event_id, Photo.content_hash == content_hash
+                )
+            )
+            if clash is not None:
+                duplicates += 1
+                continue
+            photo = Photo(
+                event_id=event_id,
+                contributor_id=user.id,
+                storage_key="",  # set below once we have the id
+                source="upload",
+                media_type="video",
+                duration_s=probed.duration_s,
+                content_hash=content_hash,
+                processing_status="pending",
+            )
+        else:
+            phash = dhash(data)
+            clash = await session.scalar(
+                select(Photo.id).where(Photo.event_id == event_id, Photo.phash == phash)
+            )
+            if clash is not None:
+                duplicates += 1
+                continue
+            photo = Photo(
+                event_id=event_id,
+                contributor_id=user.id,
+                storage_key="",  # set below once we have the id
+                source="upload",
+                phash=phash,
+                processing_status="pending",
+            )
+
         session.add(photo)
         await session.flush()
         key = f"events/{event_id}/{photo.id}"
@@ -155,6 +192,7 @@ async def upload_photos(
         photo_ids=photo_ids,
         accepted=len(photo_ids),
         duplicates=duplicates,
+        rejected=rejected,
     )
 
 
@@ -200,13 +238,58 @@ async def processing_status(
 @router.get("/photos/{photo_id}")
 async def read_photo(
     photo_id: uuid.UUID,
+    request: Request,
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> Response:
-    """Access-guarded source image: gallery member (verified in it) or host."""
+    """Access-guarded source image/video: gallery member (verified in it) or host.
+    Videos honor byte-``Range`` requests (206) so the player can scrub."""
     photo = await require_photo_read(session, user.id, photo_id)
     data = get_storage().get(photo.storage_key)
-    return Response(content=data, media_type=_content_type(data))
+
+    if photo.media_type != "video":
+        return Response(content=data, media_type=_content_type(data))
+    return _video_range_response(data, request.headers.get("range"))
+
+
+def _video_range_response(data: bytes, range_header: str | None) -> Response:
+    total = len(data)
+    if not range_header:
+        return Response(content=data, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+
+    start, end = 0, total - 1
+    try:
+        start_str, end_str = range_header.removeprefix("bytes=").split("-")
+        start = int(start_str) if start_str else 0
+        end = min(int(end_str), total - 1) if end_str else total - 1
+    except ValueError:
+        pass
+
+    chunk = data[start : end + 1]
+    return Response(
+        content=chunk,
+        media_type="video/mp4",
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{total}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(len(chunk)),
+        },
+    )
+
+
+@router.get("/photos/{photo_id}/poster")
+async def read_photo_poster(
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> Response:
+    """Poster-frame JPEG for a video (404 for stills or a not-yet-processed video)."""
+    photo = await require_photo_read(session, user.id, photo_id)
+    if not photo.poster_key:
+        raise HTTPException(status_code=404, detail="No poster for this photo")
+    data = get_storage().get(photo.poster_key)
+    return Response(content=data, media_type="image/jpeg")
 
 
 @router.get("/photos/{photo_id}/faces", response_model=list[PhotoFace])
@@ -303,11 +386,15 @@ async def delete_photo(
             raise HTTPException(status_code=403, detail="You can't delete this photo.")
 
     key = photo.storage_key
+    poster_key = photo.poster_key
     event_id = photo.event_id
     was_cover = (await session.get(Event, event_id)).cover_photo_id == photo.id
     await session.delete(photo)
     await session.commit()
-    get_storage().delete(key)
+    storage = get_storage()
+    storage.delete(key)
+    if poster_key:
+        storage.delete(poster_key)
 
     if was_cover:
         # The FK (ondelete=set null) already cleared cover_photo_id; re-pick

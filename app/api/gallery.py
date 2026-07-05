@@ -57,15 +57,16 @@ async def get_gallery(
         next_cursor = str(entries[limit - 1].id)
         entries = entries[:limit]
 
-    contributors = dict(
-        (
+    photo_rows = {
+        row.id: row
+        for row in (
             await session.execute(
-                select(Photo.id, Photo.contributor_id).where(
-                    Photo.id.in_([e.photo_id for e in entries])
-                )
+                select(
+                    Photo.id, Photo.contributor_id, Photo.media_type, Photo.duration_s
+                ).where(Photo.id.in_([e.photo_id for e in entries]))
             )
         ).all()
-    )
+    }
     # Best-shot ranking (spec 004 R1) — main-relevance items only.
     main_ids = [e.photo_id for e in entries if e.relevance != "low"]
     best_scores = await best_scores_for_account(session, user.id, main_ids)
@@ -76,8 +77,10 @@ async def get_gallery(
             relevance=e.relevance,
             demote_reason=e.demote_reason,
             confidence=e.confidence,
-            contributor_id=contributors[e.photo_id],
+            contributor_id=photo_rows[e.photo_id].contributor_id,
             best_score=best_scores.get(e.photo_id),
+            media_type=photo_rows[e.photo_id].media_type,
+            duration_s=photo_rows[e.photo_id].duration_s,
         )
         for e in entries
     ]

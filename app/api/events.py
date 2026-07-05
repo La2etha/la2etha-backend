@@ -480,6 +480,13 @@ async def delete_event(
     keys = list(
         await session.scalars(select(Photo.storage_key).where(Photo.event_id == event_id))
     )
+    keys.extend(
+        await session.scalars(
+            select(Photo.poster_key).where(
+                Photo.event_id == event_id, Photo.poster_key.is_not(None)
+            )
+        )
+    )
     if event.cover_key:
         keys.append(event.cover_key)
     # FK cascades delete photos, faces, clusters, galleries, memberships.

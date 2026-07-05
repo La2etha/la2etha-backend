@@ -12,7 +12,14 @@ class PhotoRead(BaseModel):
     id: uuid.UUID
     contributor_id: uuid.UUID
     processing_status: str
+    media_type: str = "photo"
+    duration_s: float | None = None
     created_at: datetime
+
+
+class RejectedUpload(BaseModel):
+    filename: str | None
+    reason: str
 
 
 class UploadAccepted(BaseModel):
@@ -20,6 +27,7 @@ class UploadAccepted(BaseModel):
     photo_ids: list[uuid.UUID]
     accepted: int
     duplicates: int
+    rejected: list[RejectedUpload] = []
 
 
 class ProcessingStatus(BaseModel):

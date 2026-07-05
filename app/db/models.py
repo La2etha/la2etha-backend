@@ -144,6 +144,7 @@ class Photo(Base):
     __tablename__ = "photo"
     __table_args__ = (
         Index("ix_photo_event_phash", "event_id", "phash"),
+        Index("ix_photo_content_hash", "content_hash"),
         Index(
             "ix_photo_search_embedding_hnsw",
             "search_embedding",
@@ -178,6 +179,12 @@ class Photo(Base):
     # Curation (spec 004): rewritten wholesale by the post-pipeline curation step.
     is_highlight: Mapped[bool] = mapped_column(Boolean, default=False)
     highlight_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Video support (spec 003): media_type discriminates photo|video; the rest are
+    # video-only. content_hash (SHA-256) dedupes videos the way phash dedupes stills.
+    media_type: Mapped[str] = mapped_column(String(8), default="photo")  # photo|video
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    poster_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -208,6 +215,11 @@ class DetectedFace(Base):
     cluster_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("face_cluster.id", ondelete="set null"), nullable=True, index=True
     )
+    # Video support (spec 003): null for a still photo; else which sampled frame
+    # (and its timestamp) this face came from. All frames of one video share
+    # photo_id, so clustering/gallery materialization roll up automatically.
+    frame_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_ts_s: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class FaceCluster(Base):

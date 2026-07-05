@@ -79,3 +79,49 @@ async def test_delete_event_cascades_rows_and_bytes(db_session):
     # Stored bytes gone (retention sweep).
     with pytest.raises(FileNotFoundError):
         storage.get(key)
+
+
+async def test_delete_event_cascades_video_and_poster_bytes(db_session):
+    """Spec 003 T015: a video's poster_key isn't an FK, so the DB cascade alone
+    won't purge it — delete_event must collect and delete it explicitly."""
+    host = Account(
+        id=uuid.uuid4(),
+        email="host2@example.com",
+        hashed_password="x",
+        name="host2",
+        is_active=True,
+    )
+    db_session.add(host)
+    await db_session.flush()
+
+    event = Event(
+        id=uuid.uuid4(), name="Gala", owner_id=host.id, join_code="VIDDEL", join_token="tok2"
+    )
+    db_session.add(event)
+    await db_session.flush()
+    db_session.add(Membership(event_id=event.id, account_id=host.id, role="host"))
+
+    storage = get_storage()
+    video_key = f"test-deletion/{uuid.uuid4()}.mp4"
+    poster_key = f"test-deletion/{uuid.uuid4()}-poster.jpg"
+    storage.put(video_key, b"fake mp4 bytes")
+    storage.put(poster_key, b"\xff\xd8\xff fake poster jpeg")
+
+    photo = Photo(
+        id=uuid.uuid4(),
+        event_id=event.id,
+        contributor_id=host.id,
+        storage_key=video_key,
+        media_type="video",
+        poster_key=poster_key,
+    )
+    db_session.add(photo)
+    await db_session.flush()
+
+    event_id = event.id
+    await delete_event(event_id, user=host, session=db_session)
+
+    with pytest.raises(FileNotFoundError):
+        storage.get(video_key)
+    with pytest.raises(FileNotFoundError):
+        storage.get(poster_key)

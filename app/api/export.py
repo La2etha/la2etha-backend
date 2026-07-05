@@ -56,9 +56,13 @@ async def export_photo(
     photo = await require_photo_read(session, user.id, photo_id)
     data = get_storage().get(photo.storage_key)
 
+    if payload.remove_strangers and photo.media_type == "video":
+        raise HTTPException(status_code=409, detail="video_not_supported")
+
     if not payload.remove_strangers:
         # Default path: original bytes, no model needed (SC — off by default).
-        return Response(content=data, media_type="image/jpeg")
+        media_type = "video/mp4" if photo.media_type == "video" else "image/jpeg"
+        return Response(content=data, media_type=media_type)
 
     if not lama_available():
         raise HTTPException(

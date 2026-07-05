@@ -112,13 +112,22 @@ if __name__ == "__main__":  # runnable self-check (Constitution V)
         for k in range(4):
             faces.append(Face(photo_id=f"{person}_{k}.jpg", person=person, embedding=near(vec)))
 
+    # Video ground-truth split (spec 003 SC-002): a video contributes several
+    # Face rows sharing ONE photo_id (one per sampled frame) — exactly how
+    # process_photos writes them (frame_index varies, photo_id doesn't). No
+    # special-casing needed in the recall/precision math: it should recall this
+    # as a single gallery item, same as any multi-face-in-one-photo case.
+    for k in range(5):
+        faces.append(Face(photo_id="alice_video.mp4", person="alice", embedding=near(identities["alice"])))
+
     enroll = {p: [near(v) for _ in range(3)] for p, v in identities.items()}
     gt = ground_truth_from_faces(faces)
 
     predicted = build_predicted_galleries(faces, enroll, threshold=0.35)
     report = evaluate_galleries(predicted, gt)
 
+    assert "alice_video.mp4" in predicted["alice"], "the video should recall as one gallery item"
     assert report.macro_recall > 0.9, report
     assert report.macro_precision > 0.9, report
     print(f"gallery metrics self-check OK — recall={report.macro_recall:.3f} "
-          f"precision={report.macro_precision:.3f}")
+          f"precision={report.macro_precision:.3f} (incl. video ground-truth split)")

@@ -8,6 +8,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.users import current_active_user
+from app.cv.video import probe
 from app.db.base import get_async_session
 from app.db.models import Account, Event, FaceCluster, GalleryEntry, IdentityEnrollment, Membership
 from app.schemas.enrollment import EnrollmentAccepted, EnrollmentStatus
@@ -18,6 +19,7 @@ router = APIRouter(tags=["enrollment"])
 
 MIN_SAMPLES = 3
 MAX_SAMPLES = 8
+MAX_ENROLL_VIDEO_S = 5.0
 
 
 async def _require_membership(
@@ -45,6 +47,30 @@ async def _require_not_archived(session: AsyncSession, event_id: uuid.UUID) -> N
         )
 
 
+async def _enroll_video(
+    event_id: uuid.UUID, upload: UploadFile, user: Account
+) -> EnrollmentAccepted:
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="No usable enrollment video")
+    result = probe(data)
+    if not result.ok or (result.duration_s or 0) > MAX_ENROLL_VIDEO_S:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Enrollment video must be a decodable clip up to {MAX_ENROLL_VIDEO_S:.0f}s",
+        )
+    storage = get_storage()
+    key = f"enroll/{event_id}/{user.id}/{uuid.uuid4()}.mp4"
+    storage.put(key, data)
+    job = get_queue().enqueue(
+        "app.workers.pipeline.process_video_enrollment",
+        str(user.id),
+        str(event_id),
+        key,
+    )
+    return EnrollmentAccepted(job_id=job.id, sample_count=0)
+
+
 @router.post(
     "/events/{event_id}/enroll",
     response_model=EnrollmentAccepted,
@@ -56,9 +82,14 @@ async def enroll(
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> EnrollmentAccepted:
-    """Upload 3–5 multi-angle photos → build an identity centroid in the worker."""
+    """Upload 3–5 multi-angle photos, or one short selfie video → build an
+    identity centroid in the worker."""
     await _require_membership(session, user.id, event_id)
     await _require_not_archived(session, event_id)
+
+    if len(files) == 1 and (files[0].content_type or "").startswith("video/"):
+        return await _enroll_video(event_id, files[0], user)
+
     if not (MIN_SAMPLES <= len(files) <= MAX_SAMPLES):
         raise HTTPException(
             status_code=422,

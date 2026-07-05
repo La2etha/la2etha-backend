@@ -17,6 +17,9 @@ class GalleryPhoto(BaseModel):
     # "Best photos of you" ranking (spec 004 R1) — main-relevance items only;
     # demoted entries never get one, so absence carries no "not you" signal.
     best_score: float | None = None
+    # Video support (spec 003) — duration_s is set only for media_type="video".
+    media_type: str = "photo"
+    duration_s: float | None = None
 
 
 class GalleryPage(BaseModel):

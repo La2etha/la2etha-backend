@@ -67,6 +67,46 @@ def run_ablation(
     )
 
 
+@dataclass
+class VideoArmResult:
+    photo_recall: float  # multi-angle PHOTO enrollment (existing US1 path)
+    video_recall: float  # sampled-frame VIDEO enrollment (spec 003 US1)
+
+    @property
+    def gap(self) -> float:
+        return self.photo_recall - self.video_recall
+
+
+def run_video_enrollment_arm(
+    cluster_centroids: dict[int, np.ndarray],
+    truth_labels: set[int],
+    photo_samples: list[np.ndarray],
+    video_frame_samples: list[np.ndarray],
+    threshold: float,
+) -> VideoArmResult:
+    """Video-enrollment arm (spec 003 SC-003): does enrolling from a short video's
+    sampled frames recall as well as the existing multi-angle PHOTO enrollment?
+
+    Both arms run through the identical ``aggregate_enrollment`` +
+    ``match_centroid_to_clusters`` path — video frames are just another set of
+    per-angle samples, more numerous (~10) but more correlated (a turning head
+    over ~3s) than deliberately-posed photos (3-8, wider angle spread).
+    """
+
+    def recall_for(samples: list[np.ndarray]) -> float:
+        agg = aggregate_enrollment(samples)
+        matched = {
+            cid
+            for cid, _ in match_centroid_to_clusters(agg.centroid, agg.per_angle, cluster_centroids, threshold)
+        }
+        return _recall(matched, truth_labels)
+
+    return VideoArmResult(
+        photo_recall=recall_for(photo_samples),
+        video_recall=recall_for(video_frame_samples),
+    )
+
+
 if __name__ == "__main__":  # runnable self-check (Constitution V)
     from app.cv.vectors import l2_normalize
 
@@ -97,3 +137,27 @@ if __name__ == "__main__":  # runnable self-check (Constitution V)
     assert result.single_recall < 1.0, "single-photo should miss the profile cluster"
     assert result.multi_recall > result.single_recall, "multi-angle must improve recall"
     print("enrollment ablation self-check OK")
+
+    # Video-enrollment arm (spec 003 SC-003): photo samples deliberately span
+    # frontal + profile (wide angle spread); video "frames" are tight jitter
+    # around a single head position (a ~3s clip doesn't reach profile). Video
+    # should recall the frontal cluster fine but — same as single-photo — miss
+    # the profile one, which is exactly the gap this arm exists to surface.
+    def frame_jitter(v: np.ndarray, seed: int) -> np.ndarray:
+        r = np.random.default_rng(seed)
+        return l2_normalize(v + 0.02 * r.normal(size=v.shape).astype(np.float32))
+
+    video_arm = run_video_enrollment_arm(
+        cluster_centroids=clusters,
+        truth_labels=truth,
+        photo_samples=[frontal, profile, l2_normalize((frontal + profile) / 2)],
+        video_frame_samples=[frame_jitter(frontal, seed=i) for i in range(10)],
+        threshold=0.5,
+    )
+    print(f"photo recall={video_arm.photo_recall:.2f}  video recall={video_arm.video_recall:.2f}  "
+          f"gap={video_arm.gap:.2f}")
+    assert video_arm.photo_recall == 1.0, "multi-angle photos should catch both clusters"
+    assert video_arm.video_recall < video_arm.photo_recall, (
+        "a short head-turn clip has less angle spread than posed photos — expect a recall gap"
+    )
+    print("video-enrollment arm self-check OK")
