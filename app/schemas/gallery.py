@@ -11,6 +11,9 @@ class GalleryPhoto(BaseModel):
     relevance: str = "main"  # main | low
     demote_reason: str | None = None
     confidence: float | None = None
+    # Who uploaded it — lets the client offer "delete" when member_delete_own
+    # allows it (spec 005 US5/FR-018), without a second round-trip.
+    contributor_id: uuid.UUID
 
 
 class GalleryPage(BaseModel):

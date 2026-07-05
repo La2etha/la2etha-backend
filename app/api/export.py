@@ -19,7 +19,7 @@ from app.cv.image import load_image
 from app.cv.removal import lama_available
 from app.config import get_settings
 from app.db.base import get_async_session
-from app.db.models import Account
+from app.db.models import Account, Event
 from app.services.export import faces_to_remove, is_solo_editable
 from app.storage.base import get_storage
 
@@ -96,9 +96,15 @@ async def edit_photo(
 
     photo = await require_photo_read(session, user.id, photo_id)
 
-    if get_settings().edit_solo_only and not await is_solo_editable(
-        session, photo_id, user.id
-    ):
+    # Solo guard: the global edit_solo_only flag is the secure default and the
+    # only way to disable it app-wide (dev escape hatch, never in a deploy). An
+    # event's ai_edit_scope=any_photo (spec 005 US5) is a per-event host opt-in
+    # that relaxes it for that event only; consent is still required either way.
+    event = await session.get(Event, photo.event_id)
+    solo_required = get_settings().edit_solo_only and (
+        event is None or event.ai_edit_scope != "any_photo"
+    )
+    if solo_required and not await is_solo_editable(session, photo_id, user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="AI editing is only allowed on a photo of just you (no other people).",

@@ -21,7 +21,9 @@ async def _require_membership(
 ) -> None:
     member = await session.scalar(
         select(Membership.id).where(
-            Membership.event_id == event_id, Membership.account_id == account_id
+            Membership.event_id == event_id,
+            Membership.account_id == account_id,
+            Membership.status == "active",
         )
     )
     if member is None:
@@ -54,6 +56,15 @@ async def get_gallery(
         next_cursor = str(entries[limit - 1].id)
         entries = entries[:limit]
 
+    contributors = dict(
+        (
+            await session.execute(
+                select(Photo.id, Photo.contributor_id).where(
+                    Photo.id.in_([e.photo_id for e in entries])
+                )
+            )
+        ).all()
+    )
     items = [
         GalleryPhoto(
             photo_id=e.photo_id,
@@ -61,6 +72,7 @@ async def get_gallery(
             relevance=e.relevance,
             demote_reason=e.demote_reason,
             confidence=e.confidence,
+            contributor_id=contributors[e.photo_id],
         )
         for e in entries
     ]

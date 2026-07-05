@@ -3,21 +3,25 @@
 import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.guard import require_event_host
+from app.api.photos import _content_type
 from app.auth.users import current_active_user
 from app.config import get_settings
 from app.db.base import get_async_session
 from app.db.models import Account, Event, GalleryEntry, Membership, Photo
+from app.services.membership import CannotRemoveHostError, list_members, remove_member
 from app.storage.base import get_storage
 from app.schemas.event import (
     DemotedItem,
     EventCreate,
     EventCreated,
     EventJoin,
+    EventJoined,
     EventListItem,
     EventRead,
     EventSettingsUpdate,
@@ -53,6 +57,7 @@ async def create_event(
         owner_id=user.id,
         join_code=await _unique_join_code(session),
         join_token=secrets.token_urlsafe(24),
+        event_type=payload.event_type,
     )
     session.add(event)
     await session.flush()
@@ -86,7 +91,7 @@ async def list_events(
     rows = await session.execute(
         select(Event, Membership.role, member_count, photo_count)
         .join(Membership, Membership.event_id == Event.id)
-        .where(Membership.account_id == user.id)
+        .where(Membership.account_id == user.id, Membership.status == "active")
         .order_by(Event.created_at.desc())
     )
     return [
@@ -100,12 +105,12 @@ async def list_events(
     ]
 
 
-@router.post("/join", response_model=EventRead)
+@router.post("/join", response_model=EventJoined)
 async def join_event(
     payload: EventJoin,
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
-) -> Event:
+) -> EventJoined:
     event = await session.scalar(
         select(Event).where(Event.join_code == payload.join_code.upper())
     )
@@ -113,14 +118,28 @@ async def join_event(
         raise HTTPException(status_code=404, detail="Event not found")
 
     existing = await session.scalar(
-        select(Membership.id).where(
+        select(Membership).where(
             Membership.event_id == event.id, Membership.account_id == user.id
         )
     )
     if existing is None:
-        session.add(Membership(event_id=event.id, account_id=user.id, role="member"))
+        # join_approval (spec 005 US5): new members wait for the host instead of
+        # joining instantly. Pending members have zero content access — every
+        # guard requires status == "active".
+        member_status = "pending" if event.join_approval else "active"
+        session.add(
+            Membership(
+                event_id=event.id, account_id=user.id, role="member", status=member_status
+            )
+        )
         await session.commit()
-    return event
+        existing_status = member_status
+    else:
+        existing_status = existing.status
+
+    if existing_status == "pending":
+        return EventJoined(status="pending", event=None)
+    return EventJoined(status="active", event=EventRead.model_validate(event))
 
 
 async def _require_membership(
@@ -128,7 +147,9 @@ async def _require_membership(
 ) -> Membership:
     membership = await session.scalar(
         select(Membership).where(
-            Membership.event_id == event_id, Membership.account_id == account_id
+            Membership.event_id == event_id,
+            Membership.account_id == account_id,
+            Membership.status == "active",
         )
     )
     if membership is None:
@@ -150,16 +171,115 @@ async def get_event(
 
 
 @router.get("/{event_id}/members", response_model=list[MemberRead])
-async def list_members(
+async def get_members(
+    event_id: uuid.UUID,
+    status_filter: str | None = Query(None, alias="status"),
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> list[dict]:
+    """Host-only: display name, enrolled flag, and photo-appearance count per
+    member (spec 005 FR-012). ``?status=pending`` lists the join-approval queue."""
+    await require_event_host(session, user.id, event_id)
+    return await list_members(session, event_id, status=status_filter)
+
+
+@router.delete("/{event_id}/members/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_member(
+    event_id: uuid.UUID,
+    account_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Host removes a member: revokes their event membership, enrollment, and
+    gallery access for THIS event only (spec 005 FR-013)."""
+    await require_event_host(session, user.id, event_id)
+    try:
+        await remove_member(session, event_id, account_id)
+    except CannotRemoveHostError:
+        raise HTTPException(status_code=409, detail="The host cannot remove themselves.")
+
+
+@router.post("/{event_id}/members/{account_id}/approve", status_code=status.HTTP_204_NO_CONTENT)
+async def approve_member(
+    event_id: uuid.UUID,
+    account_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    await require_event_host(session, user.id, event_id)
+    membership = await session.scalar(
+        select(Membership).where(
+            Membership.event_id == event_id, Membership.account_id == account_id
+        )
+    )
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+    membership.status = "active"
+    await session.commit()
+
+
+@router.post("/{event_id}/members/{account_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+async def reject_member(
+    event_id: uuid.UUID,
+    account_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    await require_event_host(session, user.id, event_id)
+    membership = await session.scalar(
+        select(Membership).where(
+            Membership.event_id == event_id, Membership.account_id == account_id
+        )
+    )
+    if membership is not None:
+        await session.delete(membership)
+        await session.commit()
+
+
+@router.put("/{event_id}/cover", response_model=EventRead)
+async def set_cover(
+    event_id: uuid.UUID,
+    file: UploadFile = File(...),
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> Event:
+    """Host-only: set/replace the event's cover image (boarding-pass variant)."""
+    await require_event_host(session, user.id, event_id)
+    event = await session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Cover must be an image.",
+        )
+    data = await file.read()
+    if len(data) > get_settings().max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Cover image exceeds the maximum upload size.",
+        )
+    key = f"events/{event_id}/cover"
+    get_storage().put(key, data)
+    event.cover_key = key
+    await session.commit()
+    await session.refresh(event)
+    return event
+
+
+@router.get("/{event_id}/cover")
+async def read_cover(
     event_id: uuid.UUID,
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
-) -> list[Membership]:
-    await require_event_host(session, user.id, event_id)
-    members = await session.scalars(
-        select(Membership).where(Membership.event_id == event_id)
-    )
-    return list(members)
+) -> Response:
+    """Access-guarded cover bytes — any member of the event may view it."""
+    await _require_membership(session, user.id, event_id)
+    event = await session.get(Event, event_id)
+    if event is None or event.cover_key is None:
+        raise HTTPException(status_code=404, detail="No cover set")
+    data = get_storage().get(event.cover_key)
+    return Response(content=data, media_type=_content_type(data))
 
 
 @router.patch("/{event_id}/settings", response_model=EventRead)
@@ -175,6 +295,25 @@ async def update_settings(
         raise HTTPException(status_code=404, detail="Event not found")
     if payload.privacy_default_remove_strangers is not None:
         event.privacy_default_remove_strangers = payload.privacy_default_remove_strangers
+    if payload.name_policy is not None:
+        event.name_policy = payload.name_policy
+    if payload.event_type is not None:
+        event.event_type = payload.event_type
+    if payload.gallery_visibility is not None:
+        event.gallery_visibility = payload.gallery_visibility
+    if payload.ai_edit_scope is not None:
+        event.ai_edit_scope = payload.ai_edit_scope
+    if payload.member_uploads is not None:
+        event.member_uploads = payload.member_uploads
+    if payload.member_delete_own is not None:
+        event.member_delete_own = payload.member_delete_own
+    if payload.join_approval is not None:
+        event.join_approval = payload.join_approval
+    if payload.member_list_visible is not None:
+        event.member_list_visible = payload.member_list_visible
+    if payload.uploads_closed is not None:
+        # Reuses the existing status column rather than a parallel boolean.
+        event.status = "archived" if payload.uploads_closed else "active"
     await session.commit()
     await session.refresh(event)
     return event
@@ -243,6 +382,8 @@ async def delete_event(
     keys = list(
         await session.scalars(select(Photo.storage_key).where(Photo.event_id == event_id))
     )
+    if event.cover_key:
+        keys.append(event.cover_key)
     # FK cascades delete photos, faces, clusters, galleries, memberships.
     await session.delete(event)
     await session.commit()

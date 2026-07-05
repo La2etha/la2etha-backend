@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.users import current_active_user
 from app.db.base import get_async_session
-from app.db.models import Account, FaceCluster, GalleryEntry, IdentityEnrollment, Membership
+from app.db.models import Account, Event, FaceCluster, GalleryEntry, IdentityEnrollment, Membership
 from app.schemas.enrollment import EnrollmentAccepted, EnrollmentStatus
 from app.storage.base import get_storage
 from app.workers import get_queue, get_redis
@@ -25,11 +25,24 @@ async def _require_membership(
 ) -> None:
     member = await session.scalar(
         select(Membership.id).where(
-            Membership.event_id == event_id, Membership.account_id == account_id
+            Membership.event_id == event_id,
+            Membership.account_id == account_id,
+            Membership.status == "active",
         )
     )
     if member is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+
+async def _require_not_archived(session: AsyncSession, event_id: uuid.UUID) -> None:
+    """Spec 005 US5 uploads_closed toggle: an archived event accepts no new
+    enrollments (galleries/search/export keep working)."""
+    event = await session.get(Event, event_id)
+    if event is not None and event.status == "archived":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This event is archived — no new enrollments.",
+        )
 
 
 @router.post(
@@ -45,6 +58,7 @@ async def enroll(
 ) -> EnrollmentAccepted:
     """Upload 3–5 multi-angle photos → build an identity centroid in the worker."""
     await _require_membership(session, user.id, event_id)
+    await _require_not_archived(session, event_id)
     if not (MIN_SAMPLES <= len(files) <= MAX_SAMPLES):
         raise HTTPException(
             status_code=422,

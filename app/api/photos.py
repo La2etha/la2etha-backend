@@ -7,12 +7,12 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access.guard import require_event_host, require_photo_read
+from app.access.guard import is_event_host, require_event_host, require_photo_read
 from app.auth.users import current_active_user
 from app.config import get_settings
 from app.cv.image import dhash
 from app.db.base import get_async_session
-from app.db.models import Account, DetectedFace, FaceCluster, Membership, Photo
+from app.db.models import Account, DetectedFace, Event, FaceCluster, Membership, Photo
 from app.schemas.photo import (
     GDriveIngestAccepted,
     GDriveIngestRequest,
@@ -42,11 +42,36 @@ async def _require_membership(
 ) -> None:
     member = await session.scalar(
         select(Membership.id).where(
-            Membership.event_id == event_id, Membership.account_id == account_id
+            Membership.event_id == event_id,
+            Membership.account_id == account_id,
+            Membership.status == "active",
         )
     )
     if member is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+
+async def _require_open_for_uploads(
+    session: AsyncSession, account_id: uuid.UUID, event_id: uuid.UUID
+) -> Event:
+    """Spec 005 US5: gate uploads/enrollment on the event's toggles. Returns the
+    event so callers can reuse it."""
+    event = await session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event.status == "archived":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This event is archived — no new uploads or enrollments.",
+        )
+    if event.member_uploads == "host_only" and not await is_event_host(
+        session, account_id, event_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The host is managing photos for this event.",
+        )
+    return event
 
 
 @router.post(
@@ -63,6 +88,7 @@ async def upload_photos(
     """Accept a batch of photos, collapse duplicates by phash (FR-006), store
     bytes, and enqueue background processing (202 — never blocks, SC-006)."""
     await _require_membership(session, user.id, event_id)
+    await _require_open_for_uploads(session, user.id, event_id)
     storage = get_storage()
     max_bytes = get_settings().max_upload_bytes
 
@@ -144,6 +170,7 @@ async def ingest_gdrive(
 ) -> GDriveIngestAccepted:
     """Pull images from a Google Drive folder/files into the pool (background job)."""
     await _require_membership(session, user.id, event_id)
+    await _require_open_for_uploads(session, user.id, event_id)
     if not payload.folder_id and not payload.file_ids:
         raise HTTPException(status_code=422, detail="Provide a folder_id or file_ids")
 
@@ -188,30 +215,48 @@ async def read_photo_faces(
     session: AsyncSession = Depends(get_async_session),
 ) -> list[PhotoFace]:
     """Detected-face boxes for a photo the caller may view, each flagged `is_me`
-    when its cluster is claimed by the caller — powers the trust overlay (FR-024)."""
+    when its cluster is claimed by the caller — powers the trust overlay (FR-024).
+
+    ``name`` (spec 005 FR-001/002) is populated only when the event's name_policy
+    permits it for this viewer; the gate is server-side so a policy-hidden name
+    is indistinguishable from an unclaimed guest — never a client-side hide."""
     photo = await require_photo_read(session, user.id, photo_id)
     if not photo.width or not photo.height:
         return []  # not yet processed → no boxes to normalize
 
+    event = await session.get(Event, photo.event_id)
+    caller_is_host = await is_event_host(session, user.id, photo.event_id)
+    names_allowed = event is not None and (
+        event.name_policy == "everyone" or (event.name_policy == "host_only" and caller_is_host)
+    )
+
     rows = (
         await session.execute(
-            select(DetectedFace.bbox, FaceCluster.claimed_by_account_id)
+            select(DetectedFace.bbox, FaceCluster.claimed_by_account_id, Account.name)
             .outerjoin(FaceCluster, FaceCluster.id == DetectedFace.cluster_id)
+            .outerjoin(Account, Account.id == FaceCluster.claimed_by_account_id)
             .where(DetectedFace.photo_id == photo_id)
         )
     ).all()
 
     w, h = float(photo.width), float(photo.height)
-    return [
-        PhotoFace(
-            x=bbox["x"] / w,
-            y=bbox["y"] / h,
-            w=bbox["w"] / w,
-            h=bbox["h"] / h,
-            is_me=claimed_by == user.id,
+    faces = []
+    for bbox, claimed_by, claimed_name in rows:
+        is_me = claimed_by == user.id
+        name = None
+        if not is_me and claimed_by is not None and names_allowed:
+            name = claimed_name
+        faces.append(
+            PhotoFace(
+                x=bbox["x"] / w,
+                y=bbox["y"] / h,
+                w=bbox["w"] / w,
+                h=bbox["h"] / h,
+                is_me=is_me,
+                name=name,
+            )
         )
-        for bbox, claimed_by in rows
-    ]
+    return faces
 
 
 @router.get("/events/{event_id}/pool", response_model=list[PhotoRead])
@@ -220,9 +265,43 @@ async def host_pool(
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> list[Photo]:
-    """Host-only full pool view; members are forbidden (FR-019)."""
-    await require_event_host(session, user.id, event_id)
+    """Full pool view. Host-only by default (FR-019); widened to every member
+    when the host sets gallery_visibility=everyone_sees_all (spec 005 US5) —
+    browsing is visibility only, per-photo actions keep their own guards."""
+    if await is_event_host(session, user.id, event_id):
+        pass
+    else:
+        await _require_membership(session, user.id, event_id)
+        event = await session.get(Event, event_id)
+        if event is None or event.gallery_visibility != "everyone_sees_all":
+            raise HTTPException(status_code=403, detail="Host access required")
     photos = await session.scalars(
         select(Photo).where(Photo.event_id == event_id).order_by(Photo.created_at)
     )
     return list(photos)
+
+
+@router.delete("/photos/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_photo(
+    photo_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Delete a pool photo: the host always may; the uploader may when the event
+    allows member_delete_own (spec 005 US5/FR-018). Cascades storage bytes plus
+    every FK-dependent row (faces, gallery entries/claims)."""
+    photo = await session.get(Photo, photo_id)
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    caller_is_host = await is_event_host(session, user.id, photo.event_id)
+    if not caller_is_host:
+        event = await session.get(Event, photo.event_id)
+        is_uploader = photo.contributor_id == user.id
+        if not (is_uploader and event is not None and event.member_delete_own):
+            raise HTTPException(status_code=403, detail="You can't delete this photo.")
+
+    key = photo.storage_key
+    await session.delete(photo)
+    await session.commit()
+    get_storage().delete(key)

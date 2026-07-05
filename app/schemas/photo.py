@@ -10,6 +10,7 @@ class PhotoRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    contributor_id: uuid.UUID
     processing_status: str
     created_at: datetime
 
@@ -50,3 +51,7 @@ class PhotoFace(BaseModel):
     w: float
     h: float
     is_me: bool  # this face's cluster is claimed by the requesting account
+    # Populated only when the event's name_policy permits it for this viewer
+    # (spec 005 FR-002); null is indistinguishable from "unclaimed guest" — the
+    # policy gate happens server-side, never by a client-side hide.
+    name: str | None = None

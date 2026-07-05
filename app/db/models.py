@@ -79,11 +79,33 @@ class Event(Base):
     join_code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
     join_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     privacy_default_remove_strangers: Mapped[bool] = mapped_column(Boolean, default=False)
-    status: Mapped[str] = mapped_column(String(16), default="active")  # active|archived|deleting
+    # active|archived|deleting. "archived" IS the uploads_closed toggle (spec 005
+    # US5): no new uploads/enrollments; galleries/search/export keep working.
+    status: Mapped[str] = mapped_column(String(16), default="active")
     retention: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Host-set cover image (boarding-pass variant, UI spec 002); storage key, not a URL.
+    cover_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # --- Identity & host policy (spec 005) ---
+    # Who may see enrolled members' names on faces in the trust overlay.
+    name_policy: Mapped[str] = mapped_column(String(16), default="nobody")  # nobody|host_only|everyone
+    event_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # own_only = today's behavior; everyone_sees_all lets members browse the full pool.
+    gallery_visibility: Mapped[str] = mapped_column(String(24), default="own_only")
+    # solo_only = today's behavior (AI edit only on a photo of just the caller).
+    ai_edit_scope: Mapped[str] = mapped_column(String(16), default="solo_only")
+    member_uploads: Mapped[str] = mapped_column(String(16), default="enabled")  # enabled|host_only
+    member_delete_own: Mapped[bool] = mapped_column(Boolean, default=True)
+    join_approval: Mapped[bool] = mapped_column(Boolean, default=False)
+    member_list_visible: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    @property
+    def has_cover(self) -> bool:
+        return self.cover_key is not None
 
 
 class Membership(Base):
@@ -98,6 +120,9 @@ class Membership(Base):
         ForeignKey("account.id", ondelete="cascade"), index=True
     )
     role: Mapped[str] = mapped_column(String(16), default="member")  # host|member
+    # active = full member; pending = awaiting host approval (join_approval on) —
+    # every access guard requires "active".
+    status: Mapped[str] = mapped_column(String(16), default="active")
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -22,7 +22,9 @@ async def _require_membership(
 ) -> None:
     member = await session.scalar(
         select(Membership.id).where(
-            Membership.event_id == event_id, Membership.account_id == account_id
+            Membership.event_id == event_id,
+            Membership.account_id == account_id,
+            Membership.status == "active",
         )
     )
     if member is None:
