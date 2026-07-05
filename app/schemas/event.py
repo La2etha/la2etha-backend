@@ -28,6 +28,9 @@ class EventRead(BaseModel):
     status: str
     privacy_default_remove_strangers: bool
     has_cover: bool
+    # "host" once a host has explicitly picked a cover photo (spec 004 FR-010) —
+    # lets the client offer "revert to auto-picked" only then.
+    cover_source: Literal["auto", "host"] | None = None
     # --- Identity & host policy (spec 005) ---
     name_policy: NamePolicy
     event_type: EventType | None
@@ -101,3 +104,34 @@ class DemotedItem(BaseModel):
     photo_id: uuid.UUID
     account_id: uuid.UUID
     demote_reason: str | None = None
+
+
+class HighlightItem(BaseModel):
+    """An event Highlights-strip entry (spec 004 US2), already intersected with
+    the caller's accessible photo set (R5)."""
+
+    photo_id: uuid.UUID
+    highlight_rank: int
+
+
+class SetCover(BaseModel):
+    photo_id: uuid.UUID
+
+
+class StatsMember(BaseModel):
+    account_id: uuid.UUID
+    name: str
+    enrolled: bool
+    appearance_count: int
+
+
+class EventStats(BaseModel):
+    """Host-only stats (spec 004 US4, R7). Unclaimed clusters are a count
+    only — never itemized, so no anonymous cluster is ever singled out."""
+
+    photo_count: int
+    cluster_count: int
+    enrolled_count: int
+    unclaimed_count: int
+    processing: bool
+    members: list[StatsMember]

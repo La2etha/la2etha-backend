@@ -14,6 +14,7 @@ from app.auth.users import current_active_user
 from app.config import get_settings
 from app.db.base import get_async_session
 from app.db.models import Account, Event, GalleryEntry, Membership, Photo
+from app.services.curation import auto_pick_cover_photo_id, event_stats
 from app.services.membership import CannotRemoveHostError, list_members, remove_member
 from app.storage.base import get_storage
 from app.schemas.event import (
@@ -25,7 +26,10 @@ from app.schemas.event import (
     EventListItem,
     EventRead,
     EventSettingsUpdate,
+    EventStats,
+    HighlightItem,
     MemberRead,
+    SetCover,
 )
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -273,13 +277,107 @@ async def read_cover(
     user: Account = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> Response:
-    """Access-guarded cover bytes — any member of the event may view it."""
+    """Access-guarded cover bytes — any member of the event may view it.
+
+    Fallback chain (spec 004 R6): host-uploaded cover_key (spec 002) → curated
+    cover_photo_id (host-picked or auto-picked from the event's own photos) →
+    404 (client falls back to the monogram placeholder).
+    """
     await _require_membership(session, user.id, event_id)
     event = await session.get(Event, event_id)
-    if event is None or event.cover_key is None:
+    if event is None:
         raise HTTPException(status_code=404, detail="No cover set")
-    data = get_storage().get(event.cover_key)
-    return Response(content=data, media_type=_content_type(data))
+    if event.cover_key is not None:
+        data = get_storage().get(event.cover_key)
+        return Response(content=data, media_type=_content_type(data))
+    if event.cover_photo_id is not None:
+        photo = await session.get(Photo, event.cover_photo_id)
+        if photo is None:
+            # Dangling reference (photo deleted without going through the
+            # delete-photo path) — re-pick lazily rather than 404 forever.
+            picked = await auto_pick_cover_photo_id(session, event_id)
+            event.cover_photo_id = picked
+            event.cover_source = "auto" if picked else None
+            await session.commit()
+            photo = await session.get(Photo, picked) if picked else None
+        if photo is not None:
+            data = get_storage().get(photo.storage_key)
+            return Response(content=data, media_type=_content_type(data))
+    raise HTTPException(status_code=404, detail="No cover set")
+
+
+@router.put("/{event_id}/cover/photo", response_model=EventRead)
+async def set_cover_photo(
+    event_id: uuid.UUID,
+    payload: SetCover,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> Event:
+    """Host picks an existing event photo as the cover (spec 004 US3/FR-009)."""
+    await require_event_host(session, user.id, event_id)
+    event = await session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    photo = await session.get(Photo, payload.photo_id)
+    if photo is None or photo.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    event.cover_photo_id = photo.id
+    event.cover_source = "host"
+    await session.commit()
+    await session.refresh(event)
+    return event
+
+
+@router.delete("/{event_id}/cover/photo", response_model=EventRead)
+async def clear_cover_photo(
+    event_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> Event:
+    """Host reverts to the auto-picked cover (FR-011): re-picks immediately."""
+    await require_event_host(session, user.id, event_id)
+    event = await session.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    picked = await auto_pick_cover_photo_id(session, event_id)
+    event.cover_photo_id = picked
+    event.cover_source = "auto" if picked else None
+    await session.commit()
+    await session.refresh(event)
+    return event
+
+
+@router.get("/{event_id}/highlights", response_model=list[HighlightItem])
+async def get_highlights(
+    event_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> list[HighlightItem]:
+    """Highlight photos intersected with the caller's accessible set (R5): the
+    host sees every highlight, a member only the ones they can already open."""
+    membership = await _require_membership(session, user.id, event_id)
+    stmt = select(Photo.id, Photo.highlight_rank).where(
+        Photo.event_id == event_id, Photo.is_highlight.is_(True)
+    )
+    if membership.role != "host":
+        stmt = stmt.where(
+            Photo.id.in_(
+                select(GalleryEntry.photo_id).where(GalleryEntry.account_id == user.id)
+            )
+        )
+    rows = await session.execute(stmt.order_by(Photo.highlight_rank))
+    return [HighlightItem(photo_id=pid, highlight_rank=rank) for pid, rank in rows.all()]
+
+
+@router.get("/{event_id}/stats", response_model=EventStats)
+async def get_stats(
+    event_id: uuid.UUID,
+    user: Account = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session),
+) -> EventStats:
+    """Host-only aggregates (spec 004 US4, R7)."""
+    await require_event_host(session, user.id, event_id)
+    return EventStats(**await event_stats(session, event_id))
 
 
 @router.patch("/{event_id}/settings", response_model=EventRead)

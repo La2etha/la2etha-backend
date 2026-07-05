@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.cv.image import dhash
 from app.db.base import get_async_session
 from app.db.models import Account, DetectedFace, Event, FaceCluster, Membership, Photo
+from app.services.curation import auto_pick_cover_photo_id
 from app.schemas.photo import (
     GDriveIngestAccepted,
     GDriveIngestRequest,
@@ -302,6 +303,19 @@ async def delete_photo(
             raise HTTPException(status_code=403, detail="You can't delete this photo.")
 
     key = photo.storage_key
+    event_id = photo.event_id
+    was_cover = (await session.get(Event, event_id)).cover_photo_id == photo.id
     await session.delete(photo)
     await session.commit()
     get_storage().delete(key)
+
+    if was_cover:
+        # The FK (ondelete=set null) already cleared cover_photo_id; re-pick
+        # immediately rather than leaving the event with no cover (R6). The
+        # deleted photo can no longer be a "host choice", so this reverts to auto.
+        event = await session.get(Event, event_id)
+        if event is not None:
+            picked = await auto_pick_cover_photo_id(session, event_id)
+            event.cover_photo_id = picked
+            event.cover_source = "auto" if picked else None
+            await session.commit()

@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     # Face-crop sharpness (VoL) below this corroborates an out-of-focus background face.
     proximity_sharpness_min: float = 30.0
 
+    # --- Curation (spec 004): best-shot / highlight scoring weights ---
+    # Signals-only composition of already-stored per-face/photo columns (research
+    # R1/R2) — tunable per event's camera mix, like the quality thresholds above.
+    curation_w_quality: float = 0.3
+    curation_w_det: float = 0.2
+    curation_w_area: float = 0.3
+    curation_w_sharpness: float = 0.2
+    curation_area_ref: float = 0.05
+    curation_confident_det_min: float = 0.6
+    curation_confident_area_min: float = 0.01
+    curation_group_bonus: float = 1.25
+    curation_group_min_faces: int = 3
+
     # --- Optional / later phases ---
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: str | None = None

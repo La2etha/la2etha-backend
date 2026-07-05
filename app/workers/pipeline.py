@@ -24,6 +24,7 @@ from app.cv.quality import assess_photo_quality
 from app.cv.search_embed import embed_image, search_available
 from app.db.models import DetectedFace, FaceCluster, IdentityEnrollment, Photo
 from app.db.sync import SyncSessionLocal
+from app.services.curation import refresh_curation
 from app.services.gallery import materialize_gallery, rematerialize_event, reset_auto_match
 from app.storage.base import get_storage
 
@@ -114,6 +115,9 @@ def process_photos(event_id: str, photo_ids: list[str]) -> dict:
         session.commit()
 
         new_entries = rematerialize_event(session, event_uuid)
+        session.commit()
+
+        refresh_curation(session, event_uuid)
         session.commit()
 
     return {"photos": total, "faces": faces_written, "gallery_entries": new_entries}

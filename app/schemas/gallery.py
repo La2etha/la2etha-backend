@@ -14,6 +14,9 @@ class GalleryPhoto(BaseModel):
     # Who uploaded it — lets the client offer "delete" when member_delete_own
     # allows it (spec 005 US5/FR-018), without a second round-trip.
     contributor_id: uuid.UUID
+    # "Best photos of you" ranking (spec 004 R1) — main-relevance items only;
+    # demoted entries never get one, so absence carries no "not you" signal.
+    best_score: float | None = None
 
 
 class GalleryPage(BaseModel):

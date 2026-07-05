@@ -85,6 +85,15 @@ class Event(Base):
     retention: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Host-set cover image (boarding-pass variant, UI spec 002); storage key, not a URL.
     cover_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Curated cover picked from the event's own photos (spec 004): auto-picked at
+    # the end of each pipeline run, or host-overridden. Never overwritten by auto
+    # once cover_source == "host" (FR-010). Distinct from cover_key above, which
+    # is an arbitrary uploaded image.
+    cover_photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("photo.id", ondelete="set null", use_alter=True, name="fk_event_cover_photo_id"),
+        nullable=True,
+    )
+    cover_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # auto|host
 
     # --- Identity & host policy (spec 005) ---
     # Who may see enrolled members' names on faces in the trust overlay.
@@ -105,7 +114,7 @@ class Event(Base):
 
     @property
     def has_cover(self) -> bool:
-        return self.cover_key is not None
+        return self.cover_key is not None or self.cover_photo_id is not None
 
 
 class Membership(Base):
@@ -166,6 +175,9 @@ class Photo(Base):
     processing_status: Mapped[str] = mapped_column(
         String(16), default="pending"
     )  # pending|processing|done|failed
+    # Curation (spec 004): rewritten wholesale by the post-pipeline curation step.
+    is_highlight: Mapped[bool] = mapped_column(Boolean, default=False)
+    highlight_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

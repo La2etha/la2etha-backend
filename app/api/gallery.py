@@ -10,6 +10,7 @@ from app.auth.users import current_active_user
 from app.db.base import get_async_session
 from app.db.models import Account, GalleryClaim, GalleryEntry, Membership, Photo
 from app.schemas.gallery import EmptyState, GalleryPage, GalleryPhoto
+from app.services.curation import best_scores_for_account
 
 router = APIRouter(tags=["gallery"])
 
@@ -65,6 +66,9 @@ async def get_gallery(
             )
         ).all()
     )
+    # Best-shot ranking (spec 004 R1) — main-relevance items only.
+    main_ids = [e.photo_id for e in entries if e.relevance != "low"]
+    best_scores = await best_scores_for_account(session, user.id, main_ids)
     items = [
         GalleryPhoto(
             photo_id=e.photo_id,
@@ -73,6 +77,7 @@ async def get_gallery(
             demote_reason=e.demote_reason,
             confidence=e.confidence,
             contributor_id=contributors[e.photo_id],
+            best_score=best_scores.get(e.photo_id),
         )
         for e in entries
     ]
