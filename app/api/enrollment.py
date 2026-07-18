@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from rq.job import Job
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.users import current_active_user
@@ -131,12 +131,44 @@ async def enroll_status(
     except Exception:
         return EnrollmentStatus(job_id=job_id, status="unknown")
 
-    result = job.result if job.is_finished else None
-    payload = {"job_id": job_id, "status": job.get_status(refresh=True)}
+    job_status = job.get_status(refresh=True)
+    result = job.return_value() if job.is_finished else None
+    payload = {"job_id": job_id, "status": job_status}
     if isinstance(result, dict):
         payload.update(
             {k: result.get(k) for k in ("enrolled", "quality_ok", "sample_count", "gallery_entries", "reason")}
         )
+
+    # Source-of-truth fallback. The RQ return value expires (500s default) and a
+    # job that crashed (e.g. a transient DB/Redis blip) has no return value at all
+    # — in both cases the caller is actually enrolled, yet the raw job signal would
+    # read as a face-detection failure and the client shows "no face detected". So
+    # once the job is no longer running, if we don't have a clear enrolled=True,
+    # trust the persisted enrollment: if a centroid exists for this account+event,
+    # the user IS enrolled regardless of what the ephemeral job says.
+    if job_status in ("finished", "failed", "unknown") and not payload.get("enrolled"):
+        enrollment = await session.scalar(
+            select(IdentityEnrollment).where(
+                IdentityEnrollment.account_id == user.id,
+                IdentityEnrollment.event_id == event_id,
+            )
+        )
+        if enrollment is not None:
+            gallery_count = await session.scalar(
+                select(func.count())
+                .select_from(GalleryEntry)
+                .where(
+                    GalleryEntry.account_id == user.id,
+                    GalleryEntry.event_id == event_id,
+                )
+            )
+            payload["status"] = "finished"
+            payload["enrolled"] = True
+            payload["quality_ok"] = enrollment.quality_ok
+            payload["sample_count"] = enrollment.sample_count
+            payload["gallery_entries"] = int(gallery_count or 0)
+            payload["reason"] = None
+
     return EnrollmentStatus(**payload)
 
 
