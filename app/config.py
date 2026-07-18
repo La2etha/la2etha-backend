@@ -1,12 +1,23 @@
 """Application settings, loaded from environment (.env) with sane local defaults."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Absolute path to the backend root's .env (…/la2etha-backend/.env). Anchoring to
+# this file's location — rather than a bare relative ".env" resolved against the
+# current working directory — means the API and the RQ worker load the SAME config
+# no matter which directory they're launched from. A worker started from the repo
+# root would otherwise silently miss .env and fall back to the localhost:5432
+# defaults (wrong Postgres → auth failures, no photos processed).
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
 
     # --- Database ---
     # Async driver used by the app; sync driver used by Alembic.

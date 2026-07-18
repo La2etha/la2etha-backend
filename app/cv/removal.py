@@ -42,9 +42,13 @@ def _load():
         return _lama
     with _lock:
         if _lama is None:
+            import torch
             from simple_lama_inpainting import SimpleLama
 
-            _lama = SimpleLama()
+            # Pin the device explicitly instead of trusting the library default,
+            # so removal runs on the GPU whenever CUDA is present (and we know it).
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            _lama = SimpleLama(device=device)
     return _lama
 
 
